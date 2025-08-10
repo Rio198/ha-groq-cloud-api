@@ -1,0 +1,66 @@
+{
+  "title": "Groq Cloud API",
+  "config": {
+    "step": {
+      "user": {
+        "title": "API Key",
+        "data": {
+          "api_key": "[%key:common::config_flow::data::api_key%]"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
+      "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
+      "unknown": "[%key:common::config_flow::error::unknown%]"
+    },
+    "abort": {
+      "already_configured": "[%key:common::config_flow::abort::already_configured_device%]"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Groq Cloud Options",
+        "data": {
+          "prompt": "Instructions",
+          "chat_model": "Chat model",
+          "max_tokens": "Maximum tokens to return in response",
+          "temperature": "Temperature",
+          "top_p": "Top P",
+          "llm_hass_api": "Home Assistant LLM API",
+          "recommended": "Recommended model settings"
+        },
+        "data_description": {
+          "prompt": "Instruct how the LLM should respond. This can be a template."
+        }
+      },
+      "advanced": {
+        "title": "Advanced Options",
+        "data": {
+            "chat_model": "Chat model",
+            "max_tokens": "Maximum tokens to return in response",
+            "temperature": "Temperature",
+            "top_p": "Top P"
+        }
+      }
+    }
+  },
+  "services": {
+    "generate_content": {
+      "name": "Generate content",
+      "description": "Generate a response from the Groq API.",
+      "fields": {
+        "prompt": {
+          "name": "Prompt",
+          "description": "The prompt to send to the Groq API."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "invalid_config_entry": {
+      "message": "Invalid config entry provided. Got {config_entry}"
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "entity": {
+    "conversation": {
+      "default": "mdi:robot"
+    }
+  },
+  "services": {
+    "generate_content": "mdi:robot"
+  }
+}

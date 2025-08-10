@@ -1,27 +1,29 @@
-"""Config flow for GroqCloud Whisper integration."""
+"""Config flow for Groq Cloud API integration."""
 
 from __future__ import annotations
 
-import asyncio
+import logging
 from typing import Any
-from types import MappingProxyType
 
 import groq
-
-import requests
 import voluptuous as vol
 
-from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import (
     ConfigEntry,
+    ConfigEntryState,
     ConfigFlow,
     ConfigFlowResult,
-    OptionsFlow,
+    ConfigSubentryFlow,
+    SubentryFlowResult,
 )
-from homeassistant import exceptions
-from homeassistant.const import CONF_API_KEY, CONF_NAME, CONF_LLM_HASS_API, CONF_MODEL
+from homeassistant.const import (
+    CONF_API_KEY,
+    CONF_LLM_HASS_API,
+    CONF_NAME,
+)
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import llm
-import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers.httpx_client import get_async_client
 from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
@@ -30,98 +32,67 @@ from homeassistant.helpers.selector import (
     SelectSelectorConfig,
     TemplateSelector,
 )
+from homeassistant.helpers.typing import VolDictType
 
-from . import LOGGER
 from .const import (
-    CONF_PROMPT,
-    CONF_TEMPERATURE,
-    DEFAULT_NAME,
     CONF_CHAT_MODEL,
     CONF_MAX_TOKENS,
     CONF_PROMPT,
     CONF_RECOMMENDED,
     CONF_TEMPERATURE,
     CONF_TOP_P,
+    DEFAULT_AI_TASK_NAME,
+    DEFAULT_CONVERSATION_NAME,
     DOMAIN,
+    LOGGER,
+    RECOMMENDED_AI_TASK_OPTIONS,
     RECOMMENDED_CHAT_MODEL,
+    RECOMMENDED_CONVERSATION_OPTIONS,
     RECOMMENDED_MAX_TOKENS,
     RECOMMENDED_TEMPERATURE,
     RECOMMENDED_TOP_P,
 )
 
+_LOGGER = logging.getLogger(__name__)
+
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_NAME, default=DEFAULT_NAME): cv.string,
-        vol.Required(CONF_API_KEY): cv.string,
+        vol.Required(CONF_API_KEY): str,
     }
 )
 
-RECOMMENDED_OPTIONS = {
-    CONF_RECOMMENDED: True,
-    CONF_LLM_HASS_API: llm.LLM_API_ASSIST,
-    CONF_PROMPT: llm.DEFAULT_INSTRUCTIONS_PROMPT,
-}
 
-
-async def validate_input(hass: HomeAssistant, data: dict[str, Any]):
-    """Validate the user input."""
-
-    obscured_api_key = data.get(CONF_API_KEY)
-    data[CONF_API_KEY] = "<api_key>"
-    LOGGER.debug("User validation got: %s", data)
-    data[CONF_API_KEY] = obscured_api_key
-
-    if data.get(CONF_TEMPERATURE) is None:
-        data[CONF_CHAT_MODEL] = RECOMMENDED_CHAT_MODEL
-
-    response = await asyncio.to_thread(
-        requests.get,
-        url="https://api.groq.com/openai/v1/models",
-        headers={
-            "Authorization": f"Bearer {data.get(CONF_API_KEY)}",
-            "Content-Type": "application/json"
-        },
+async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> None:
+    """Validate the user input allows us to connect."""
+    client = groq.AsyncGroq(
+        api_key=data[CONF_API_KEY], http_client=get_async_client(hass)
     )
-
-    LOGGER.debug("Models request took %f s and returned %d - %s", response.elapsed.seconds, response.status_code, response.reason)
-
-    if response.status_code == 401:
-        raise InvalidAPIKey
-
-    if response.status_code == 403:
-        raise UnauthorizedError
-
-    if response.status_code != 200:
-        raise UnknownError
-
-    for model in response.json().get("data", []):
-        if model.get("id") == data.get(CONF_CHAT_MODEL):
-            break
-        if model == response.json().get("data")[-1]:
-            raise ModelNotFound
-    
-    LOGGER.debug("User validation successful")
+    models = await hass.async_add_executor_job(
+        client.with_options(timeout=10.0).models.list
+    )
+    model_ids = {model.id for model in models.data}
+    if RECOMMENDED_CHAT_MODEL not in model_ids:
+        raise vol.Invalid(f"Recommended model {RECOMMENDED_CHAT_MODEL} not available.")
 
 
 class GroqConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Handle UI config flow."""
+    """Handle a config flow for Groq Cloud API."""
 
     VERSION = 1
     MINOR_VERSION = 0
 
     async def async_step_user(
-        self,
-        user_input: dict[str, Any] | None = None,
-        errors: dict[str, str] | None = None,
+        self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Handle initial step."""
+        """Handle the initial step."""
         if user_input is None:
             return self.async_show_form(
                 step_id="user", data_schema=STEP_USER_DATA_SCHEMA
             )
-        
-        errors = {}
 
+        errors: dict[str, str] = {}
+
+        self._async_abort_entries_match(user_input)
         try:
             await validate_input(self.hass, user_input)
         except groq.APIConnectionError:
@@ -129,146 +100,196 @@ class GroqConfigFlow(ConfigFlow, domain=DOMAIN):
         except groq.AuthenticationError:
             errors["base"] = "invalid_auth"
         except Exception:
-            LOGGER.exception("Unexpected exception")
+            _LOGGER.exception("Unexpected exception")
             errors["base"] = "unknown"
         else:
             return self.async_create_entry(
-                title="GroqCloud",
+                title="Groq Cloud",
                 data=user_input,
-                options=RECOMMENDED_OPTIONS,
+                subentries=[
+                    {
+                        "subentry_type": "conversation",
+                        "data": RECOMMENDED_CONVERSATION_OPTIONS,
+                        "title": DEFAULT_CONVERSATION_NAME,
+                        "unique_id": None,
+                    },
+                    {
+                        "subentry_type": "ai_task_data",
+                        "data": RECOMMENDED_AI_TASK_OPTIONS,
+                        "title": DEFAULT_AI_TASK_NAME,
+                        "unique_id": None,
+                    },
+                ],
             )
 
         return self.async_show_form(
             step_id="user", data_schema=STEP_USER_DATA_SCHEMA, errors=errors
         )
 
+    @classmethod
+    @callback
+    def async_get_supported_subentry_types(
+        cls, config_entry: ConfigEntry
+    ) -> dict[str, type[ConfigSubentryFlow]]:
+        """Return subentries supported by this integration."""
+        return {
+            "conversation": GroqSubentryFlowHandler,
+            "ai_task_data": GroqSubentryFlowHandler,
+        }
 
-    @staticmethod
-    def async_get_options_flow(
-        config_entry: ConfigEntry,
-    ) -> OptionsFlow:
-        """Create the options flow."""
-        return GroqOptionsFlow(config_entry)
-    
 
+class GroqSubentryFlowHandler(ConfigSubentryFlow):
+    """Flow for managing Groq Cloud API subentries."""
 
-class GroqOptionsFlow(OptionsFlow):
-    """Groq Cloud config flow options handler."""
+    last_rendered_recommended = False
+    options: dict[str, Any]
 
-    def __init__(self, config_entry: ConfigEntry) -> None:
-        """Initialize options flow."""
-        self.config_entry = config_entry
-        self.last_rendered_recommended = config_entry.options.get(
-            CONF_RECOMMENDED, False
-        )
+    @property
+    def _is_new(self) -> bool:
+        """Return if this is a new subentry."""
+        return self.source == "user"
+
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Add a subentry."""
+        if self._subentry_type == "ai_task_data":
+            self.options = RECOMMENDED_AI_TASK_OPTIONS.copy()
+        else:
+            self.options = RECOMMENDED_CONVERSATION_OPTIONS.copy()
+        return await self.async_step_init()
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Handle reconfiguration of a subentry."""
+        self.options = self._get_reconfigure_subentry().data.copy()
+        return await self.async_step_init()
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Manage the options."""
-        options: dict[str, Any] | MappingProxyType[str, Any] = self.config_entry.options
+    ) -> SubentryFlowResult:
+        """Manage initial options."""
+        # abort if entry is not loaded
+        if self._get_entry().state != ConfigEntryState.LOADED:
+            return self.async_abort(reason="entry_not_loaded")
+
+        options = self.options
+
+        hass_apis: list[SelectOptionDict] = [
+            SelectOptionDict(
+                label=api.name,
+                value=api.id,
+            )
+            for api in llm.async_get_apis(self.hass)
+        ]
+        if (suggested_llm_apis := options.get(CONF_LLM_HASS_API)) and isinstance(
+            suggested_llm_apis, str
+        ):
+            options[CONF_LLM_HASS_API] = [suggested_llm_apis]
+
+        step_schema: VolDictType = {}
+
+        if self._is_new:
+            if self._subentry_type == "ai_task_data":
+                default_name = DEFAULT_AI_TASK_NAME
+            else:
+                default_name = DEFAULT_CONVERSATION_NAME
+            step_schema[vol.Required(CONF_NAME, default=default_name)] = str
+
+        if self._subentry_type == "conversation":
+            step_schema.update(
+                {
+                    vol.Optional(
+                        CONF_PROMPT,
+                        description={
+                            "suggested_value": options.get(
+                                CONF_PROMPT, llm.DEFAULT_INSTRUCTIONS_PROMPT
+                            )
+                        },
+                    ): TemplateSelector(),
+                    vol.Optional(CONF_LLM_HASS_API): SelectSelector(
+                        SelectSelectorConfig(options=hass_apis, multiple=True)
+                    ),
+                }
+            )
+
+        step_schema[
+            vol.Required(CONF_RECOMMENDED, default=options.get(CONF_RECOMMENDED, False))
+        ] = bool
 
         if user_input is not None:
-            if user_input[CONF_RECOMMENDED] == self.last_rendered_recommended:
-                if user_input[CONF_LLM_HASS_API] == "none":
-                    user_input.pop(CONF_LLM_HASS_API)
-                return self.async_create_entry(title="", data=user_input)
+            if not user_input.get(CONF_LLM_HASS_API):
+                user_input.pop(CONF_LLM_HASS_API, None)
 
-            # Re-render the options again, now with the recommended options shown/hidden
-            self.last_rendered_recommended = user_input[CONF_RECOMMENDED]
+            if user_input[CONF_RECOMMENDED]:
+                if self._is_new:
+                    return self.async_create_entry(
+                        title=user_input.pop(CONF_NAME),
+                        data=user_input,
+                    )
+                return self.async_update_and_abort(
+                    self._get_entry(),
+                    self._get_reconfigure_subentry(),
+                    data=user_input,
+                )
 
-            options = {
-                CONF_RECOMMENDED: user_input[CONF_RECOMMENDED],
-                CONF_PROMPT: user_input[CONF_PROMPT],
-                CONF_LLM_HASS_API: user_input[CONF_LLM_HASS_API],
-            }
+            options.update(user_input)
+            if CONF_LLM_HASS_API in options and CONF_LLM_HASS_API not in user_input:
+                options.pop(CONF_LLM_HASS_API)
+            return await self.async_step_advanced()
 
-        schema = groq_config_option_schema(self.hass, options)
         return self.async_show_form(
             step_id="init",
-            data_schema=vol.Schema(schema),
+            data_schema=self.add_suggested_values_to_schema(
+                vol.Schema(step_schema), options
+            ),
         )
 
+    async def async_step_advanced(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Manage advanced options."""
+        options = self.options
+        errors: dict[str, str] = {}
 
-def groq_config_option_schema(
-    hass: HomeAssistant,
-    options: dict[str, Any] | MappingProxyType[str, Any],
-) -> dict:
-    """Return a schema for Groq Cloud completion options."""
-    hass_apis: list[SelectOptionDict] = [
-        SelectOptionDict(
-            label="No control",
-            value="none",
-        )
-    ]
-    hass_apis.extend(
-        SelectOptionDict(
-            label=api.name,
-            value=api.id,
-        )
-        for api in llm.async_get_apis(hass)
-    )
-
-    schema = {
-        vol.Optional(
-            CONF_PROMPT,
-            description={
-                "suggested_value": options.get(
-                    CONF_PROMPT, llm.DEFAULT_INSTRUCTIONS_PROMPT
-                )
-            },
-        ): TemplateSelector(),
-        vol.Optional(
-            CONF_LLM_HASS_API,
-            description={"suggested_value": options.get(CONF_LLM_HASS_API)},
-            default="none",
-        ): SelectSelector(SelectSelectorConfig(options=hass_apis)),
-        vol.Required(
-            CONF_RECOMMENDED, default=options.get(CONF_RECOMMENDED, False)
-        ): bool,
-    }
-
-    if options.get(CONF_RECOMMENDED):
-        return schema
-
-    schema.update(
-        {
+        step_schema: VolDictType = {
             vol.Optional(
                 CONF_CHAT_MODEL,
-                description={"suggested_value": options.get(CONF_CHAT_MODEL)},
                 default=RECOMMENDED_CHAT_MODEL,
             ): str,
             vol.Optional(
                 CONF_MAX_TOKENS,
-                description={"suggested_value": options.get(CONF_MAX_TOKENS)},
                 default=RECOMMENDED_MAX_TOKENS,
             ): int,
             vol.Optional(
                 CONF_TOP_P,
-                description={"suggested_value": options.get(CONF_TOP_P)},
                 default=RECOMMENDED_TOP_P,
             ): NumberSelector(NumberSelectorConfig(min=0, max=1, step=0.05)),
             vol.Optional(
                 CONF_TEMPERATURE,
-                description={"suggested_value": options.get(CONF_TEMPERATURE)},
                 default=RECOMMENDED_TEMPERATURE,
             ): NumberSelector(NumberSelectorConfig(min=0, max=2, step=0.05)),
         }
-    )
-    return schema
 
+        if user_input is not None:
+            options.update(user_input)
 
-class UnknownError(exceptions.HomeAssistantError):
-    """Unknown error."""
+            if self._is_new:
+                return self.async_create_entry(
+                    title=options.pop(CONF_NAME),
+                    data=options,
+                )
+            return self.async_update_and_abort(
+                self._get_entry(),
+                self._get_reconfigure_subentry(),
+                data=options,
+            )
 
-
-class UnauthorizedError(exceptions.HomeAssistantError):
-    """API key valid but doesn't have the rights to use Whisper."""
-
-
-class InvalidAPIKey(exceptions.HomeAssistantError):
-    """Invalid api_key error."""
-
-
-class ModelNotFound(exceptions.HomeAssistantError):
-    """Model can't be found in the GroqCloud model's list."""
+        return self.async_show_form(
+            step_id="advanced",
+            data_schema=self.add_suggested_values_to_schema(
+                vol.Schema(step_schema), options
+            ),
+            errors=errors,
+        )
