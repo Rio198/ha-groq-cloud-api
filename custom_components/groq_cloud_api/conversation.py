@@ -226,13 +226,7 @@ class GroqConversationEntity(
                     response=intent_response, conversation_id=chat_log.conversation_id
                 )
         
-        # Add system prompt
-        if options.get(CONF_PROMPT):
-            chat_log.async_add_system_content(
-                SystemContent(content=options[CONF_PROMPT])
-            )
-        
-        # Add user message
+        # Add user message to chat log
         chat_log.async_add_user_content(
             UserContent(content=user_input.text)
         )
@@ -243,6 +237,12 @@ class GroqConversationEntity(
             ]
 
         messages = _chat_log_to_messages(chat_log)
+        
+        # Add system prompt at the beginning if configured
+        if options.get(CONF_PROMPT):
+            messages.insert(0, ChatCompletionSystemMessageParam(
+                role="system", content=options[CONF_PROMPT]
+            ))
 
         LOGGER.debug("Prompt: %s", messages)
         LOGGER.debug("Tools: %s", tools)
