@@ -200,7 +200,7 @@ class GroqConversationEntity(
         options = self.entry.options
 
         try:
-            await chat_log.async_provide_llm_data(
+            await chat_log.async_update_llm_data(
                 user_input.as_llm_context(DOMAIN),
                 options.get(CONF_LLM_HASS_API),
                 options.get(CONF_PROMPT),
