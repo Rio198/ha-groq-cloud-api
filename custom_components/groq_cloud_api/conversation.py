@@ -201,8 +201,7 @@ class GroqConversationEntity(
 
         try:
             await chat_log.async_update_llm_data(
-                user_input.text,
-                user_input.context,
+                user_input,
                 options.get(CONF_LLM_HASS_API),
                 options.get(CONF_PROMPT),
             )
