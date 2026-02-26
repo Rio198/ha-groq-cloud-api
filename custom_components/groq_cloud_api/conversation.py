@@ -239,9 +239,16 @@ class GroqConversationEntity(
         messages = _chat_log_to_messages(chat_log)
         
         # Add system prompt at the beginning if configured
-        if options.get(CONF_PROMPT):
+        system_prompt = options.get(CONF_PROMPT, "")
+        
+        # If no tools are available, explicitly tell the model not to use function calls
+        if not tools:
+            no_tool_instruction = "\n\nIMPORTANT: You do not have access to any functions or tools. Do not attempt to call any functions. Respond directly to the user in natural language only."
+            system_prompt = system_prompt + no_tool_instruction if system_prompt else no_tool_instruction.strip()
+        
+        if system_prompt:
             messages.insert(0, ChatCompletionSystemMessageParam(
-                role="system", content=options[CONF_PROMPT]
+                role="system", content=system_prompt
             ))
 
         LOGGER.debug("Prompt: %s", messages)
@@ -323,20 +330,36 @@ class GroqConversationEntity(
                 chat_log.async_add_assistant_content_without_tools(assistant_content)
                 break
 
+            # If model tries to call tools but no LLM API is configured, ignore tool calls
+            # and use the text response instead
+            if llm_api is None:
+                LOGGER.warning(
+                    "Model attempted tool calls but no LLM API configured. Using text response only."
+                )
+                # Use the text response if available, otherwise return an error
+                if response.content:
+                    chat_log.async_add_assistant_content_without_tools(
+                        AssistantContent(
+                            agent_id=self.entity_id,
+                            content=response.content,
+                            tool_calls=None,
+                        )
+                    )
+                    break
+                else:
+                    intent_response = intent.IntentResponse(language=user_input.language)
+                    intent_response.async_set_error(
+                        intent.IntentResponseErrorCode.UNKNOWN,
+                        "Model attempted to call tools but no LLM API is configured. Please disable tool calling in your model or configure LLM API.",
+                    )
+                    return conversation.ConversationResult(
+                        response=intent_response,
+                        conversation_id=chat_log.conversation_id,
+                    )
+
             for tool_call in assistant_tool_calls:
                 LOGGER.debug(
                     "Tool call: %s(%s)", tool_call.tool_name, tool_call.tool_args
-                )
-
-            if llm_api is None:
-                intent_response = intent.IntentResponse(language=user_input.language)
-                intent_response.async_set_error(
-                    intent.IntentResponseErrorCode.UNKNOWN,
-                    "Tool call requested but no LLM API configured",
-                )
-                return conversation.ConversationResult(
-                    response=intent_response,
-                    conversation_id=chat_log.conversation_id,
                 )
 
             async for tool_result_content in chat_log.async_add_assistant_content(
