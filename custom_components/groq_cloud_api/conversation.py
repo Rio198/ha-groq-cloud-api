@@ -27,7 +27,6 @@ from homeassistant.components.conversation import (
     SystemContent,
     ToolResultContent,
     UserContent,
-    async_get_result_from_chat_log,
     trace,
 )
 from homeassistant.config_entries import ConfigEntry
@@ -330,7 +329,12 @@ class GroqConversationEntity(
                     )
                 )
 
-        return async_get_result_from_chat_log(user_input, chat_log)
+        intent_response = intent.IntentResponse(language=user_input.language)
+        intent_response.async_set_speech(chat_log.content[-1].content or "")
+        return conversation.ConversationResult(
+            response=intent_response,
+            conversation_id=chat_log.conversation_id,
+        )
 
     async def _async_entry_update_listener(
         self, hass: HomeAssistant, entry: ConfigEntry
