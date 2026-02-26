@@ -199,18 +199,43 @@ class GroqConversationEntity(
         """Process the user input and call the API."""
         options = self.entry.options
 
-        try:
-            await chat_log.async_update_llm_data(
-                user_input.text,
-                user_input.context,
-                options.get(CONF_LLM_HASS_API),
-                options.get(CONF_PROMPT),
-                user_input.agent_id,
+        llm_api: llm.API | None = None
+        
+        if options.get(CONF_LLM_HASS_API):
+            try:
+                llm_api = await llm.async_get_api(
+                    self.hass,
+                    options[CONF_LLM_HASS_API],
+                    llm.LLMContext(
+                        platform=DOMAIN,
+                        context=user_input.context,
+                        user_prompt=user_input.text,
+                        language=user_input.language,
+                        assistant=conversation.DOMAIN,
+                        device_id=user_input.device_id,
+                    ),
+                )
+            except llm.APINotFoundError:
+                LOGGER.error("LLM API %s not found", options[CONF_LLM_HASS_API])
+                intent_response = intent.IntentResponse(language=user_input.language)
+                intent_response.async_set_error(
+                    intent.IntentResponseErrorCode.UNKNOWN,
+                    f"LLM API {options[CONF_LLM_HASS_API]} not found",
+                )
+                return conversation.ConversationResult(
+                    response=intent_response, conversation_id=chat_log.conversation_id
+                )
+        
+        # Add system prompt
+        if options.get(CONF_PROMPT):
+            chat_log.async_add_system_content(
+                SystemContent(content=options[CONF_PROMPT])
             )
-        except ConverseError as err:
-            return err.as_conversation_result()
-
-        llm_api = chat_log.llm_api
+        
+        # Add user message
+        chat_log.async_add_user_content(
+            UserContent(content=user_input.text)
+        )
         tools: list[ChatCompletionToolParam] | None = None
         if llm_api:
             tools = [
