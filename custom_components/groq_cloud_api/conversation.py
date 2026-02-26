@@ -201,9 +201,11 @@ class GroqConversationEntity(
 
         try:
             await chat_log.async_update_llm_data(
-                user_input,
+                user_input.text,
+                user_input.context,
                 options.get(CONF_LLM_HASS_API),
                 options.get(CONF_PROMPT),
+                user_input.agent_id,
             )
         except ConverseError as err:
             return err.as_conversation_result()
