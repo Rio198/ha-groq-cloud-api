@@ -296,6 +296,93 @@ class GroqConversationEntity(
 
                 result = await client.chat.completions.create(**model_kwargs)
             except groq.GroqError as err:
+                # Check if this is a tool_use_failed error with XML-style function calls
+                error_str = str(err)
+                if "tool_use_failed" in error_str and "failed_generation" in error_str:
+                    LOGGER.warning("Model attempted invalid tool call format: %s", error_str)
+                    
+                    # Try to extract the failed function call
+                    import re
+                    match = re.search(r"<function=(\w+)(?:=|\[])(\{[^}]+\})", error_str)
+                    
+                    # If we have LLM API and found a valid tool call, try to execute it
+                    if match and llm_api:
+                        tool_name = match.group(1)
+                        try:
+                            tool_args = json.loads(match.group(2))
+                            LOGGER.info(
+                                "Extracted tool call from failed generation: %s(%s)",
+                                tool_name,
+                                tool_args,
+                            )
+                            
+                            # Create a synthetic tool call
+                            assistant_tool_calls = [
+                                llm.ToolInput(
+                                    id=f"call_{tool_name}",
+                                    tool_name=tool_name,
+                                    tool_args=tool_args,
+                                )
+                            ]
+                            
+                            # Create assistant content with the tool call
+                            assistant_content = AssistantContent(
+                                agent_id=self.entity_id,
+                                content=None,
+                                tool_calls=assistant_tool_calls,
+                            )
+                            
+                            # Execute the tool call
+                            tool_results = []
+                            async for tool_result_content in chat_log.async_add_assistant_content(
+                                assistant_content
+                            ):
+                                tool_results.append(tool_result_content)
+                                LOGGER.debug(
+                                    "Tool response: %s -> %s",
+                                    tool_result_content.tool_name,
+                                    tool_result_content.tool_result,
+                                )
+                            
+                            # If tool execution succeeded, return success response
+                            if tool_results:
+                                intent_response = intent.IntentResponse(language=user_input.language)
+                                intent_response.async_set_speech("好的，已完成。")
+                                return conversation.ConversationResult(
+                                    response=intent_response,
+                                    conversation_id=chat_log.conversation_id,
+                                )
+                        except (json.JSONDecodeError, Exception) as parse_err:
+                            LOGGER.warning("Failed to parse or execute tool call: %s", parse_err)
+                    
+                    # If tool execution failed or no LLM API, retry without tools
+                    LOGGER.info("Retrying request without tools for conversational response")
+                    try:
+                        retry_kwargs = model_kwargs.copy()
+                        retry_kwargs["tools"] = NOT_GIVEN
+                        result = await client.chat.completions.create(**retry_kwargs)
+                        # Continue with normal processing
+                        LOGGER.debug("Retry response %s", result)
+                        response = result.choices[0].message
+                        
+                        # Process the response without tools
+                        assistant_content = AssistantContent(
+                            agent_id=self.entity_id,
+                            content=response.content,
+                            tool_calls=None,
+                        )
+                        chat_log.async_add_assistant_content_without_tools(assistant_content)
+                        
+                        intent_response = intent.IntentResponse(language=user_input.language)
+                        intent_response.async_set_speech(response.content or "")
+                        return conversation.ConversationResult(
+                            response=intent_response,
+                            conversation_id=chat_log.conversation_id,
+                        )
+                    except Exception as retry_err:
+                        LOGGER.error("Retry without tools also failed: %s", retry_err)
+                
+                # If we couldn't handle the error specially, return generic error
                 intent_response = intent.IntentResponse(language=user_input.language)
                 intent_response.async_set_error(
                     intent.IntentResponseErrorCode.UNKNOWN,
